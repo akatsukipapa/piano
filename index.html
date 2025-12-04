@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Air Piano 2 Octaves</title>
+    <title>Air Piano Full Screen</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #111; font-family: sans-serif; }
         #video-container {
@@ -38,7 +38,7 @@
 <body>
 
     <div id="overlay">
-        <h1>Air Piano (Wide) 🎹</h1>
+        <h1>Air Piano (Full Screen) 🎹</h1>
         <p>カメラに向かって人差し指で鍵盤をタッチしてください</p>
         <button id="start-btn">スタート</button>
     </div>
@@ -80,8 +80,10 @@
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         
-        // 変更点: 鍵盤が増えたのでカメラを少し後ろ(z=11)に下げて全体を映す
-        camera.position.set(0, 5, 11);
+        // 【修正点】カメラの位置調整
+        // Zを11 -> 8.5 に近づけ、Yを5 -> 6 に上げて見下ろす形に
+        // これにより左右の余白が減り、鍵盤が大きく見えます
+        camera.position.set(0, 6, 8.5);
         camera.lookAt(0, 0, 0);
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -94,13 +96,14 @@
         dirLight.position.set(5, 10, 7);
         scene.add(dirLight);
 
-        // --- 鍵盤データ (2オクターブ分) ---
+        // --- 鍵盤データ ---
         const keys = [];
-        const whiteKeyWidth = 1.0;
-        const whiteKeyHeight = 0.5;
-        const whiteKeyDepth = 3.0;
         
-        // C4 (ド) から C6 (高いド) まで
+        // 【修正点】鍵盤の幅を少し大きく (1.0 -> 1.1)
+        const whiteKeyWidth = 1.1; 
+        const whiteKeyHeight = 0.5;
+        const whiteKeyDepth = 3.5; // 奥行きも少しアップ
+        
         const notes = [
             // 1オクターブ目
             { note: 'C4', freq: 261.63, color: 0xffffff },
@@ -128,8 +131,8 @@
             const material = new THREE.MeshStandardMaterial({ color: n.color });
             const key = new THREE.Mesh(geometry, material);
             
-            // 自動的に中央揃えで配置
-            key.position.x = (index - notes.length / 2) * whiteKeyWidth + 0.5;
+            // 配置ロジック
+            key.position.x = (index - notes.length / 2) * whiteKeyWidth + (whiteKeyWidth / 2);
             key.position.y = 0;
             key.position.z = 0;
             
@@ -145,7 +148,7 @@
 
         // --- パーティクル ---
         const particles = [];
-        const particleGeo = new THREE.SphereGeometry(0.05, 8, 8);
+        const particleGeo = new THREE.SphereGeometry(0.08, 8, 8); // 粒も少し大きく
         const particleMat = new THREE.MeshBasicMaterial({ color: 0x00d2ff });
 
         function spawnParticles(position) {
@@ -156,7 +159,7 @@
                 mesh.userData = {
                     velocity: new THREE.Vector3(
                         (Math.random() - 0.5) * 0.2,
-                        Math.random() * 0.3,
+                        Math.random() * 0.4, // 跳ねる高さをアップ
                         (Math.random() - 0.5) * 0.2
                     ),
                     life: 1.0
@@ -167,7 +170,7 @@
         }
 
         // --- カーソル & レイキャスター ---
-        const cursorGeo = new THREE.SphereGeometry(0.2, 16, 16);
+        const cursorGeo = new THREE.SphereGeometry(0.25, 16, 16); // カーソルも大きく
         const cursorMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.8 });
         const cursor = new THREE.Mesh(cursorGeo, cursorMat);
         scene.add(cursor);
@@ -207,7 +210,7 @@
             if (isHandDetected) {
                 raycaster.setFromCamera(fingerPos, camera);
                 
-                // カーソル位置の更新
+                // カーソル位置
                 const planeY = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.5);
                 const targetV = new THREE.Vector3();
                 raycaster.ray.intersectPlane(planeY, targetV);
@@ -230,7 +233,6 @@
                 }
             }
 
-            // 鍵盤リセット処理
             keys.forEach(key => {
                 if (key.userData.cooldown > 0) key.userData.cooldown--;
                 let isIntersecting = false;
@@ -245,7 +247,6 @@
                 }
             });
 
-            // パーティクル更新
             for (let i = particles.length - 1; i >= 0; i--) {
                 const p = particles[i];
                 p.position.add(p.userData.velocity);
