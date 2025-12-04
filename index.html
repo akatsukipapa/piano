@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Air Piano with Hand Tracking</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; font-family: sans-serif; }
+        #video-container {
+            position: absolute; bottom: 20px; left: 20px;
+            width: 160px; height: 120px;
+            border-radius: 12px; overflow: hidden;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            z-index: 10; transform: scaleX(-1);
+        }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        #overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; justify-content: center; align-items: center;
+            background: rgba(0,0,0,0.8); z-index: 100; flex-direction: column; color: white;
+        }
+        button {
+            padding: 15px 30px; font-size: 1.2rem; cursor: pointer;
+            background: #00d2ff; border: none; border-radius: 50px; color: #000; font-weight: bold;
+            margin-top: 20px; transition: 0.3s;
+        }
+        button:hover { transform: scale(1.1); background: #fff; }
+    </style>
+    
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <!-- スタート画面（ブラウザの音声再生制限を解除するため） -->
+    <div id="overlay">
+        <h1>Air Piano 🎹</h1>
+        <p>カメラに向かって人差し指で鍵盤をタッチしてください</p>
+        <button id="start-btn">スタート</button>
+    </div>
+
+    <div id="video-container">
+        <video id="input-video" playsinline></video>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- オーディオエンジン (Web Audio API) ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        function playTone(freq) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            
+            osc.type = 'sine'; // 音色: sine, square, sawtooth, triangle
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            
+            // 音の減衰（エンベロープ）
+            gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 1.0);
+            
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            
+            osc.start();
+            osc.stop(audioCtx.currentTime + 1.0);
+        }
+
+        // --- Three.js セットアップ ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 3, 6);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // ライト
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+
+        // --- ピアノ鍵盤の作成 ---
+        const keys = [];
+        const whiteKeyWidth = 1.0;
+        const whiteKeyHeight = 0.5;
+        const whiteKeyDepth = 3.0;
+        
+        // ドレミファソラシド (周波数)
+        const notes = [
+            { note: 'C', freq: 261.63, color: 0xffffff },
+            { note: 'D', freq: 293.66, color: 0xffffff },
+            { note: 'E', freq: 329.63, color: 0xffffff },
+            { note: 'F', freq: 349.23, color: 0xffffff },
+            { note: 'G', freq: 392.00, color: 0xffffff },
+            { note: 'A', freq: 440.00, color: 0xffffff },
+            { note: 'B', freq: 493.88, color: 0xffffff },
+            { note: 'C2', freq: 523.25, color: 0xffffff }
+        ];
+
+        const geometry = new THREE.BoxGeometry(whiteKeyWidth * 0.9, whiteKeyHeight, whiteKeyDepth);
+        
+        // 鍵盤を並べる
+        notes.forEach((n, index) => {
+            const material = new THREE.MeshStandardMaterial({ color: n.color });
+            const key = new THREE.Mesh(geometry, material);
+            
+            // 配置 (中央揃え)
+            key.position.x = (index - notes.length / 2) * whiteKeyWidth + 0.5;
+            key.position.y = 0;
+            key.position.z = 0;
+            
+            // プロパティ追加
+            key.userData = { 
+                freq: n.freq, 
+                originalColor: n.color,
+                isPressed: false,
+                cooldown: 0
+            };
+            
+            scene.add(key);
+            keys.push(key);
+        });
+
+        // --- パーティクルシステム (打鍵時のエフェクト) ---
+        const particles = [];
+        const particleGeo = new THREE.SphereGeometry(0.05, 8, 8);
+        const particleMat = new THREE.MeshBasicMaterial({ color: 0x00d2ff });
+
+        function spawnParticles(position) {
+            for(let i=0; i<10; i++) {
+                const mesh = new THREE.Mesh(particleGeo, particleMat.clone());
+                mesh.position.copy(position);
+                mesh.position.y += 0.3; // 少し上から
+                
+                // ランダムな速度
+                mesh.userData = {
+                    velocity: new THREE.Vector3(
+                        (Math.random() - 0.5) * 0.2,
+                        Math.random() * 0.3,
+                        (Math.random() - 0.5) * 0.2
+                    ),
+                    life: 1.0
+                };
+                scene.add(mesh);
+                particles.push(mesh);
+            }
+        }
+
+        // --- 指先カーソル (視覚ガイド) ---
+        const cursorGeo = new THREE.SphereGeometry(0.2, 16, 16);
+        const cursorMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.8 });
+        const cursor = new THREE.Mesh(cursorGeo, cursorMat);
+        scene.add(cursor);
+
+        // --- 当たり判定用 ---
+        const raycaster = new THREE.Raycaster();
+        const fingerPos = new THREE.Vector2(); // スクリーン座標 (-1 ~ 1)
+        let isHandDetected = false;
+
+        // --- MediaPipe Hands 設定 ---
+        const videoElement = document.getElementById('input-video');
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 0, // Liteモデル
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                isHandDetected = true;
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // 人差し指の先端 (Index Finger Tip: #8)
+                const indexTip = landmarks[8];
+
+                // MediaPipeの座標(0~1)をThree.jsのスクリーン座標(-1~1)に変換
+                // ※ ミラーリングしているため、X軸を反転させる
+                fingerPos.x = - (indexTip.x * 2 - 1); 
+                fingerPos.y = - (indexTip.y * 2 - 1);
+                
+            } else {
+                isHandDetected = false;
+                cursor.visible = false;
+            }
+        }
+
+        // --- アニメーションループ ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 1. カーソルと当たり判定の更新
+            if (isHandDetected) {
+                // レイキャスト（カメラから指の方向へ線を飛ばす）
+                raycaster.setFromCamera(fingerPos, camera);
+                
+                // カーソルをレイ上の一定距離に表示（疑似的な3D位置）
+                const rayDir = raycaster.ray.direction.clone().multiplyScalar(10); // 距離適当
+                // cursor.position.copy(camera.position).add(rayDir); 
+                // もっと単純に、レイと平面(y=0.2くらい)の交点を計算してカーソルを置く
+                const planeY = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.5); // y=0.5の平面
+                const targetV = new THREE.Vector3();
+                raycaster.ray.intersectPlane(planeY, targetV);
+                if (targetV) {
+                    cursor.position.copy(targetV);
+                    cursor.visible = true;
+                }
+
+                // 鍵盤との交差判定
+                const intersects = raycaster.intersectObjects(keys);
+
+                if (intersects.length > 0) {
+                    const hitObj = intersects[0].object;
+                    
+                    // まだ押されていない、かつクールダウン済みなら発音
+                    if (!hitObj.userData.isPressed && hitObj.userData.cooldown <= 0) {
+                        hitObj.userData.isPressed = true;
+                        hitObj.userData.cooldown = 15; // フレーム数で再トリガー制限
+                        
+                        // アクション
+                        playTone(hitObj.userData.freq);
+                        hitObj.material.color.set(0x00d2ff); // 青く光る
+                        hitObj.position.y = -0.2; // 少し沈む
+                        spawnParticles(hitObj.position);
+                    }
+                }
+            }
+
+            // 2. 鍵盤の状態リセット
+            keys.forEach(key => {
+                if (key.userData.cooldown > 0) key.userData.cooldown--;
+
+                // 指が離れていたら元に戻す
+                let isIntersecting = false;
+                if (isHandDetected) {
+                     const intersects = raycaster.intersectObject(key);
+                     if (intersects.length > 0) isIntersecting = true;
+                }
+
+                if (!isIntersecting && key.userData.isPressed) {
+                    key.userData.isPressed = false;
+                    key.material.color.set(key.userData.originalColor);
+                    key.position.y = 0; // 元の高さへ
+                }
+            });
+
+            // 3. パーティクルの更新
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.position.add(p.userData.velocity);
+                p.userData.life -= 0.02;
+                p.material.opacity = p.userData.life;
+                
+                if (p.userData.life <= 0) {
+                    scene.remove(p);
+                    particles.splice(i, 1);
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- 初期化処理 ---
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 320, height: 240
+        });
+
+        document.getElementById('start-btn').addEventListener('click', () => {
+            document.getElementById('overlay').style.display = 'none';
+            audioCtx.resume();
+            cameraUtils.start();
+            animate();
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
